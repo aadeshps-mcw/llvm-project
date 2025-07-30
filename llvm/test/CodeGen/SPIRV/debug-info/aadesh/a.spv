@@ -1,0 +1,58 @@
+	OpCapability Kernel
+	OpCapability Addresses
+	OpCapability Linkage
+	OpExtension "SPV_KHR_non_semantic_info"
+	%1 = OpExtInstImport "OpenCL.std"
+	%25 = OpExtInstImport "NonSemantic.Shader.DebugInfo.100"
+	OpMemoryModel Physical64 OpenCL
+	%23 = OpString "/media/aadeshps/a7c95f0a-1803-444e-8334-da85467b1a4d/llvm-project/llvm/test/CodeGen/SPIRV/debug-info/aadesh/template.cpp"
+	%27 = OpString "int"
+	%29 = OpString "FixedArray<int, 10>"
+	%30 = OpString "_ZTS10FixedArrayIiLi10EE"
+	%31 = OpString "data"
+	%35 = OpString "T"
+	%37 = OpString "N"
+	OpSource OpenCL_CPP 100000
+	OpName %20 "main"
+	OpName %22 "fa_global"
+	OpName %8 "struct.FixedArray"
+	OpName %21 "retval"
+	OpName %2 "entry"
+	OpDecorate %21 Alignment 4
+	OpDecorate %20 LinkageAttributes "main" Export
+	OpDecorate %22 Alignment 4
+	OpDecorate %22 LinkageAttributes "fa_global" Export
+	%3 = OpTypeInt 32 0
+	%4 = OpTypeFunction %3
+	%5 = OpTypePointer Function %3
+	%6 = OpConstant %3 10
+	%7 = OpTypeArray %3 %6
+	%8 = OpTypeStruct %7
+	%9 = OpTypePointer Function %8
+	%10 = OpConstantNull %3
+	%11 = OpTypeVoid
+	%12 = OpConstant %3 5
+	%13 = OpConstant %3 3
+	%14 = OpConstant %3 32
+	%15 = OpConstant %3 4
+	%16 = OpConstant %3 19
+	%17 = OpConstant %3 320
+	%18 = OpConstant %3 4194304
+	%19 = OpConstantNull %8
+	%24 = OpExtInst %11 %25 DebugSource %23
+	%26 = OpExtInst %11 %25 DebugCompilationUnit %13 %12 %24 %10
+	%28 = OpExtInst %11 %25 DebugTypeBasic %27 %14 %15 %10
+	%20 = OpFunction %3 DontInline %4       ; -- Begin function main
+	%2 = OpLabel
+	%21 = OpVariable %5 Function 
+	%22 = OpVariable %9 Function %19
+	OpStore %21 %10 Aligned 4
+	%32 = OpExtInst %11 %25 DebugTypeMember %31 %33 %24 %12 %10 %10 %17 %10
+	%34 = OpExtInst %11 %25 DebugTypeComposite %29 %16 %24 %15 %10 %26 %30 %17 %18 %32
+	%36 = OpExtInst %11 %25 DebugTypeTemplateParameter %35 %28
+	%38 = OpExtInst %11 %25 DebugTypeTemplateParameter %37 %28 %10
+	%39 = OpExtInst %11 %25 DebugTypeTemplate %34 %36 %38
+	%40 = OpExtInst %11 %25 DebugTypeArray %28 %6
+	OpReturnValue %10
+	OpFunctionEnd
+                                        ; -- End function
