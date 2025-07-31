@@ -89,7 +89,8 @@ private:
       const SPIRVInstrInfo *TII, const SPIRVRegisterInfo *TRI,
       const RegisterBankInfo *RBI, MachineFunction &MF,
       const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
-          &BasicTypeRegPairs);
+          &BasicTypeRegPairs,
+      const Register DebugSourceResIdReg);
 
   void emitDebugTypeComposite(
       const DICompositeType *CompTy, MachineIRBuilder &MIRBuilder,
@@ -111,6 +112,16 @@ private:
       const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
           &BasicTypeRegPairs,
       SmallVectorImpl<Register> &MemberRegs);
+
+  void emitDebugTypeEnum(
+      const DICompositeType *EnumTy, MachineIRBuilder &MIRBuilder,
+      MachineRegisterInfo &MRI, SPIRVGlobalRegistry *GR,
+      const SPIRVType *VoidTy, const SPIRVType *I32Ty,
+      const SPIRVInstrInfo *TII, const SPIRVRegisterInfo *TRI,
+      const RegisterBankInfo *RBI, MachineFunction &MF,
+      const Register &SourceReg, const Register &CUReg,
+      const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
+          &BasicTypeRegPairs);
 };
 } // anonymous namespace
 
@@ -618,7 +629,8 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
                    << CompTy->getName() << "\n";
 
       emitTemplateDebugInstructions(CompTy, MIRBuilder, MRI, GR, VoidTy, I32Ty,
-                                    TII, TRI, RBI, MF, BasicTypeRegPairs);
+                                    TII, TRI, RBI, MF, BasicTypeRegPairs,
+                                    DebugSourceResIdReg);
     }
 
     for (const auto *Imported : ImportedEntities) {
@@ -812,7 +824,8 @@ void SPIRVEmitNonSemanticDI::extractTypeMetadata(
       ArrayTypes.insert(CT);
     else if (CT->getTag() == dwarf::DW_TAG_structure_type ||
              CT->getTag() == dwarf::DW_TAG_class_type ||
-             CT->getTag() == dwarf::DW_TAG_union_type) {
+             CT->getTag() == dwarf::DW_TAG_union_type ||
+             CT->getTag() == dwarf::DW_TAG_enumeration_type) {
       llvm::errs() << "Extracting composite type: " << CT->getName() << "\n";
       CompositeTypes.insert(CT);
       if (const auto *CT = dyn_cast<DICompositeType>(Ty)) {
@@ -1020,18 +1033,17 @@ void SPIRVEmitNonSemanticDI::emitTemplateDebugInstructions(
     const SPIRVRegisterInfo *TRI, const RegisterBankInfo *RBI,
     MachineFunction &MF,
     const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
-        &BasicTypeRegPairs) {
+        &BasicTypeRegPairs,
+    const Register DebugSourceResIdReg) {
 
   const DINodeArray TemplateParams = CompTy->getTemplateParams();
   if (TemplateParams.empty())
     return;
 
-  // Get debug info context
-  Register SourceReg = GR->getOrCreateSourceOperand(
-      CompTy->getFile(), MIRBuilder, MRI, TII, VoidTy, GR);
-  Register LineReg = GR->buildConstantInt(CompTy->getLine(), MIRBuilder, I32Ty);
+  Register LineReg =
+      GR->buildConstantInt(CompTy->getLine(), MIRBuilder, I32Ty, false);
   Register ColumnReg = GR->buildConstantInt(
-      0, MIRBuilder, I32Ty); // No column info in DICompositeType
+      0, MIRBuilder, I32Ty, false); // No column info in DICompositeType
 
   SmallVector<Register, 4> ParamRegs;
 
@@ -1050,11 +1062,12 @@ void SPIRVEmitNonSemanticDI::emitTemplateDebugInstructions(
 
       // Use DebugInfoNone for type parameters
       Register NoneReg =
-          EmitDebugInfoNone(MIRBuilder, MRI, GR, VoidTy, TII, TRI, RBI, MF);
+          EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugInfoNone, {},
+                            MIRBuilder, MRI, GR, VoidTy, TII, TRI, RBI, MF);
 
       ParamRegs.push_back(EmitDIInstruction(
           SPIRV::NonSemanticExtInst::DebugTypeTemplateParameter,
-          {NameStr, TypeReg, NoneReg, SourceReg, LineReg, ColumnReg},
+          {NameStr, TypeReg, NoneReg, DebugSourceResIdReg, LineReg, ColumnReg},
           MIRBuilder, MRI, GR, VoidTy, TII, TRI, RBI, MF));
 
     } else if (auto *TVP = dyn_cast<DITemplateValueParameter>(MD)) {
@@ -1069,7 +1082,7 @@ void SPIRVEmitNonSemanticDI::emitTemplateDebugInstructions(
 
       ParamRegs.push_back(EmitDIInstruction(
           SPIRV::NonSemanticExtInst::DebugTypeTemplateParameter,
-          {NameStr, TypeReg, ValueReg, SourceReg, LineReg, ColumnReg},
+          {NameStr, TypeReg, ValueReg, DebugSourceResIdReg, LineReg, ColumnReg},
           MIRBuilder, MRI, GR, VoidTy, TII, TRI, RBI, MF));
     }
   }
@@ -1097,12 +1110,14 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeComposite(
     const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
         &BasicTypeRegPairs) {
 
-  if (!CompTy || CompTy->getTag() != dwarf::DW_TAG_structure_type)
+  if (!CompTy)
     return;
 
-  if (Register Existing = GR->getDebugValue(CompTy); Existing.isValid()) {
-    llvm::errs() << "Skipping already emitted composite: " << CompTy->getName()
-                 << "\n";
+  unsigned TagValue = CompTy->getTag();
+
+  if (TagValue == dwarf::DW_TAG_enumeration_type) {
+    emitDebugTypeEnum(CompTy, MIRBuilder, MRI, GR, VoidTy, I32Ty, TII, TRI, RBI,
+                      MF, SourceReg, CUReg, BasicTypeRegPairs);
     return;
   }
 
@@ -1192,4 +1207,53 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeMember(
                         MIRBuilder, MRI, GR, VoidTy, TII, TRI, RBI, MF);
 
   MemberRegs.push_back(MemberReg);
+}
+void SPIRVEmitNonSemanticDI::emitDebugTypeEnum(
+    const DICompositeType *EnumTy, MachineIRBuilder &MIRBuilder,
+    MachineRegisterInfo &MRI, SPIRVGlobalRegistry *GR, const SPIRVType *VoidTy,
+    const SPIRVType *I32Ty, const SPIRVInstrInfo *TII,
+    const SPIRVRegisterInfo *TRI, const RegisterBankInfo *RBI,
+    MachineFunction &MF, const Register &SourceReg, const Register &CUReg,
+    const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
+        &BasicTypeRegPairs) {
+
+  if (Register Existing = GR->getDebugValue(EnumTy); Existing.isValid())
+    return;
+
+  Register NameStr = EmitOpString(EnumTy->getName(), MIRBuilder, MRI, GR);
+  Register TypeReg = findEmittedBasicTypeReg(
+      EnumTy->getBaseType(),
+      BasicTypeRegPairs); // You may already have this helper
+  Register Line =
+      GR->buildConstantInt(EnumTy->getLine(), MIRBuilder, I32Ty, false);
+  Register Column = GR->buildConstantInt(0, MIRBuilder, I32Ty, false);
+  Register Size =
+      GR->buildConstantInt(EnumTy->getSizeInBits(), MIRBuilder, I32Ty, false);
+  Register Flags =
+      GR->buildConstantInt(EnumTy->getFlags(), MIRBuilder, I32Ty, false);
+
+  SmallVector<Register, 16> EnumOperands;
+  for (Metadata *MD : EnumTy->getElements()) {
+    if (auto *E = dyn_cast<DIEnumerator>(MD)) {
+      int64_t ValRaw = E->getValue().getSExtValue();
+      llvm::errs() << "Emitting enumerator: " << E->getName()
+                   << " with value: " << ValRaw << "\n";
+      Register Val = GR->buildConstantInt(
+          E->getValue().getZExtValue(), MIRBuilder, I32Ty, /*IsSigned*/ false);
+
+      // Register Val = GR->buildConstantInt(ValRaw, MIRBuilder, I32Ty, true);
+
+      Register Name = EmitOpString(E->getName(), MIRBuilder, MRI, GR);
+      EnumOperands.push_back(Val);
+      EnumOperands.push_back(Name);
+    }
+  }
+  SmallVector<Register, 12> Ops = {NameStr, TypeReg, SourceReg, Line,
+                                   Column,  CUReg,   Size,      Flags};
+  Ops.append(EnumOperands);
+
+  Register Res =
+      EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugTypeEnum, Ops,
+                        MIRBuilder, MRI, GR, VoidTy, TII, TRI, RBI, MF);
+  GR->addDebugValue(EnumTy, Res);
 }
