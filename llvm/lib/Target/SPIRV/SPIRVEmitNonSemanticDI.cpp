@@ -21,6 +21,7 @@
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugProgramInstruction.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Path.h"
@@ -65,18 +66,18 @@ struct DebugInfoCollector {
   SmallPtrSet<DICompositeType *, 12> ArrayTypes;
   SmallPtrSet<const DICompositeType *, 8> CompositeTypesWithTemplates;
   SmallPtrSet<const DICompositeType *, 8> CompositeTypes;
+  SmallPtrSet<const DICompositeType *, 8> EnumTypes;
   DenseSet<const DIType *> visitedTypes;
 };
-struct SPIRVEmitNonSemanticDI : public MachineFunctionPass {
+struct SPIRVEmitNonSemanticDI : public llvm::ModulePass {
   static char ID;
   SPIRVTargetMachine *TM;
   SPIRVEmitNonSemanticDI(SPIRVTargetMachine *TM = nullptr)
-      : MachineFunctionPass(ID), TM(TM) {}
+      : ModulePass(ID), TM(TM) {}
 
-  bool runOnMachineFunction(MachineFunction &MF) override;
+  bool runOnModule(llvm::Module &M) override;
 
 private:
-
   bool IsGlobalDIEmitted = false;
   bool emitGlobalDI(MachineFunction &MF);
   uint32_t mapDwarfTagToTypeComposite(const DICompositeType *CT);
@@ -182,6 +183,13 @@ private:
       const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
           &BasicTypeRegPairs);
 
+  void emitAllDebugTypeEnum(
+      const SmallPtrSetImpl<const DICompositeType *> &EnumTypes,
+      SPIRVCodeGenContext &Ctx, const Register &DebugSourceResIdReg,
+      const Register &DebugCompUnitResIdReg,
+      const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
+          &BasicTypeRegPairs);
+
   void emitDebugTypeComposite(
       const DICompositeType *CompTy, SPIRVCodeGenContext &Ctx,
       const Register &SourceReg, const Register &CUReg,
@@ -211,6 +219,8 @@ private:
   void emitDebugTypePtrToMember(
       const SmallPtrSetImpl<DIDerivedType *> &PtrToMemberTypes,
       SPIRVCodeGenContext &Ctx);
+
+  void getAnalysisUsage(AnalysisUsage &AU) const;
 };
 } // namespace
 
@@ -219,7 +229,7 @@ INITIALIZE_PASS(SPIRVEmitNonSemanticDI, DEBUG_TYPE,
 
 char SPIRVEmitNonSemanticDI::ID = 0;
 
-MachineFunctionPass *
+llvm::ModulePass *
 llvm::createSPIRVEmitNonSemanticDIPass(SPIRVTargetMachine *TM) {
   return new SPIRVEmitNonSemanticDI(TM);
 }
@@ -481,6 +491,8 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
     emitAllDebugTypeComposites(Collector.CompositeTypes, Ctx,
                                DebugSourceResIdReg, DebugCompUnitResIdReg,
                                BasicTypeRegPairs);
+    emitAllDebugTypeEnum(Collector.EnumTypes, Ctx, DebugSourceResIdReg,
+                         DebugCompUnitResIdReg, BasicTypeRegPairs);
 
     emitDebugQualifiedTypes(Collector.QualifiedDerivedTypes, BasicTypeRegPairs,
                             Ctx);
@@ -498,16 +510,16 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
   return true;
 }
 
-bool SPIRVEmitNonSemanticDI::runOnMachineFunction(MachineFunction &MF) {
-  bool Res = false;
-  // emitGlobalDI needs to be executed only once to avoid
-  // emitting duplicates
-  if (!IsGlobalDIEmitted) {
-    IsGlobalDIEmitted = true;
-    Res = emitGlobalDI(MF);
-  }
-  return Res;
-}
+// bool SPIRVEmitNonSemanticDI::runOnMachineFunction(MachineFunction &MF) {
+//   bool Res = false;
+//   // emitGlobalDI needs to be executed only once to avoid
+//   // emitting duplicates
+//   if (!IsGlobalDIEmitted) {
+//     IsGlobalDIEmitted = true;
+//     Res = emitGlobalDI(MF);
+//   }
+//   return Res;
+// }
 
 uint32_t SPIRVEmitNonSemanticDI::mapDwarfTagToTypeQualifier(unsigned Tag) {
   switch (Tag) {
@@ -549,24 +561,23 @@ void SPIRVEmitNonSemanticDI::extractTypeMetadata(
       Collector.ArrayTypes.insert(CT);
     } else if (CT->getTag() == dwarf::DW_TAG_structure_type ||
                CT->getTag() == dwarf::DW_TAG_class_type ||
-               CT->getTag() == dwarf::DW_TAG_union_type ||
-               CT->getTag() == dwarf::DW_TAG_enumeration_type) {
+               CT->getTag() == dwarf::DW_TAG_union_type) {
       Collector.CompositeTypes.insert(CT);
+    } else if (CT->getTag() == dwarf::DW_TAG_enumeration_type) {
+      Collector.EnumTypes.insert(CT);
     }
 
     for (Metadata *Element : CT->getElements()) {
       if (auto *Member = dyn_cast<DIDerivedType>(Element)) {
-        // A member is a derived type; process its base type.
         extractTypeMetadata(Member->getBaseType(), Collector);
       } else if (auto *SR = dyn_cast<DISubrange>(Element)) {
-        // An array subrange can have a variable size; process its type.
         if (auto *CountVar = SR->getCount().dyn_cast<DIVariable *>()) {
           extractTypeMetadata(CountVar->getType(), Collector);
         }
       }
     }
 
-    // Process the base type of the composite (e.g., for base classes).
+    // Process the base type of the composite.
     extractTypeMetadata(CT->getBaseType(), Collector);
     return;
   }
@@ -1085,7 +1096,6 @@ void SPIRVEmitNonSemanticDI::emitAllTemplateDebugInstructions(
   }
 }
 
-// This function handles the entire collection of composite types.
 void SPIRVEmitNonSemanticDI::emitAllDebugTypeComposites(
     const SmallPtrSetImpl<const DICompositeType *> &CompositeTypes,
     SPIRVCodeGenContext &Ctx, const Register &DebugSourceResIdReg,
@@ -1094,9 +1104,21 @@ void SPIRVEmitNonSemanticDI::emitAllDebugTypeComposites(
         &BasicTypeRegPairs) {
 
   for (auto *CT : CompositeTypes) {
-    // NOTE: The redundant extractTypeMetadata call has been removed.
     emitDebugTypeComposite(CT, Ctx, DebugSourceResIdReg, DebugCompUnitResIdReg,
                            BasicTypeRegPairs);
+  }
+}
+
+void SPIRVEmitNonSemanticDI::emitAllDebugTypeEnum(
+    const SmallPtrSetImpl<const DICompositeType *> &EnumTypes,
+    SPIRVCodeGenContext &Ctx, const Register &DebugSourceResIdReg,
+    const Register &DebugCompUnitResIdReg,
+    const SmallVectorImpl<std::pair<const DIBasicType *const, const Register>>
+        &BasicTypeRegPairs) {
+
+  for (auto *CT : EnumTypes) {
+    emitDebugTypeEnum(CT, Ctx, DebugSourceResIdReg, DebugCompUnitResIdReg,
+                      BasicTypeRegPairs);
   }
 }
 
@@ -1109,12 +1131,6 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeComposite(
   if (!CompTy)
     return;
 
-  unsigned TagValue = CompTy->getTag();
-
-  if (TagValue == dwarf::DW_TAG_enumeration_type) {
-    emitDebugTypeEnum(CompTy, Ctx, SourceReg, CUReg, BasicTypeRegPairs);
-    return;
-  }
   Register NameStr = EmitOpString(CompTy->getName(), Ctx);
   Register LinkageNameStr = EmitOpString(CompTy->getIdentifier(), Ctx);
   uint32_t Tag = mapDwarfTagToTypeComposite(CompTy);
@@ -1124,8 +1140,8 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeComposite(
                << " with tag " << CompTy->getTag() << "\n";
   Register Line = Ctx.GR->buildConstantInt(CompTy->getLine(), Ctx.MIRBuilder,
                                            Ctx.I32Ty, false);
-  Register Column = Ctx.GR->buildConstantInt(0, Ctx.MIRBuilder, Ctx.I32Ty,
-                                             false); // Not available
+  Register Column =
+      Ctx.GR->buildConstantInt(0, Ctx.MIRBuilder, Ctx.I32Ty, false);
   Register SizeReg = Ctx.GR->buildConstantInt(CompTy->getSizeInBits(),
                                               Ctx.MIRBuilder, Ctx.I32Ty, false);
   uint32_t Flags = transDebugFlags(CompTy);
@@ -1559,4 +1575,40 @@ SPIRVEmitNonSemanticDI::mapDwarfTagToTypeComposite(const DICompositeType *CT) {
   default:
     llvm_unreachable("Unknown DWARF tag for DebugTypeComposite");
   }
+}
+
+bool SPIRVEmitNonSemanticDI::runOnModule(llvm::Module &M) {
+  bool Changed = false;
+
+  auto *MMIWrapper = getAnalysisIfAvailable<MachineModuleInfoWrapperPass>();
+  if (!MMIWrapper) {
+    return Changed;
+  }
+  auto &MMI = MMIWrapper->getMMI();
+
+  if (MMI.getModule() != &M) {
+    return Changed;
+  }
+
+  if (M.begin() == M.end())
+    return false;
+
+  for (auto &F : M) {
+    if (F.isDeclaration())
+      continue;
+    if (MachineFunction *MF = MMI.getMachineFunction(F)) {
+
+      emitGlobalDI(*MF);
+
+    } else {
+      continue;
+    }
+  }
+
+  return Changed;
+}
+
+void SPIRVEmitNonSemanticDI::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.addRequired<MachineModuleInfoWrapperPass>();
+  AU.setPreservesAll();
 }
