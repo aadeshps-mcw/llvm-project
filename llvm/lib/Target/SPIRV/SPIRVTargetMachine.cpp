@@ -55,7 +55,8 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeSPIRVTarget() {
   initializeSPIRVPostLegalizerPass(PR);
   initializeSPIRVMergeRegionExitTargetsPass(PR);
   initializeSPIRVEmitIntrinsicsPass(PR);
-  initializeSPIRVEmitNonSemanticDIPass(PR);
+  initializeSPIRVEmitNonSemanticDIModulePass(PR);
+  initializeSPIRVEmitNonSemanticDIMFPass(PR);
   initializeSPIRVPrepareFunctionsPass(PR);
   initializeSPIRVStripConvergentIntrinsicsPass(PR);
 }
@@ -263,7 +264,9 @@ static cl::opt<bool> SPVEnableNonSemanticDI(
 
 void SPIRVPassConfig::addPreEmitPass() {
   if (SPVEnableNonSemanticDI) {
-    addPass(createSPIRVEmitNonSemanticDIPass(&getTM<SPIRVTargetMachine>()));
+    addPass(
+        createSPIRVEmitNonSemanticDIModulePass(&getTM<SPIRVTargetMachine>()));
+    addPass(createSPIRVEmitNonSemanticDIMFPass(&getTM<SPIRVTargetMachine>()));
   }
 }
 

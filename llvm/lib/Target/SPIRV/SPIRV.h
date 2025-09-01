@@ -30,7 +30,8 @@ FunctionPass *createSPIRVPreLegalizerCombiner();
 FunctionPass *createSPIRVPreLegalizerPass();
 FunctionPass *createSPIRVPostLegalizerPass();
 ModulePass *createSPIRVEmitIntrinsicsPass(SPIRVTargetMachine *TM);
-ModulePass *createSPIRVEmitNonSemanticDIPass(SPIRVTargetMachine *TM);
+ModulePass *createSPIRVEmitNonSemanticDIModulePass(SPIRVTargetMachine *TM);
+MachineFunctionPass *createSPIRVEmitNonSemanticDIMFPass(SPIRVTargetMachine *TM);
 InstructionSelector *
 createSPIRVInstructionSelector(const SPIRVTargetMachine &TM,
                                const SPIRVSubtarget &Subtarget,
@@ -44,7 +45,8 @@ void initializeSPIRVPreLegalizerCombinerPass(PassRegistry &);
 void initializeSPIRVPostLegalizerPass(PassRegistry &);
 void initializeSPIRVStructurizerPass(PassRegistry &);
 void initializeSPIRVEmitIntrinsicsPass(PassRegistry &);
-void initializeSPIRVEmitNonSemanticDIPass(PassRegistry &);
+void initializeSPIRVEmitNonSemanticDIModulePass(PassRegistry &);
+void initializeSPIRVEmitNonSemanticDIMFPass(PassRegistry &);
 void initializeSPIRVLegalizePointerCastPass(PassRegistry &);
 void initializeSPIRVRegularizerPass(PassRegistry &);
 void initializeSPIRVMergeRegionExitTargetsPass(PassRegistry &);

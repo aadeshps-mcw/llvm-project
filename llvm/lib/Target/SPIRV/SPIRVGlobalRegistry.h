@@ -40,6 +40,9 @@ class SPIRVGlobalRegistry : public SPIRVIRMapping {
 
   DenseMap<SPIRVType *, const Type *> SPIRVToLLVMType;
 
+  Register DebugSourceID = 0;
+  Register DebugCompilationUnitID = 0;
+
   // map a Function to its definition (as a machine instruction operand)
   DenseMap<const Function *, const MachineOperand *> FunctionToInstr;
   DenseMap<const MachineInstr *, const Function *> FunctionToInstrRev;
@@ -134,8 +137,23 @@ public:
     auto It = FunResPointerTypes.find(ArgF);
     return It == FunResPointerTypes.end() ? nullptr : It->second;
   }
+  Register getDebugSourceID() const {
+    return DebugSourceID;
+  }
 
-    Register getDebugValue(const Metadata *MD) const {
+  void setDebugSourceID(Register ID) {
+    DebugSourceID = ID;
+  }
+
+  Register getDebugCompilationUnitID() const {
+    return DebugCompilationUnitID;
+  }
+
+  void setDebugCompilationUnitID(Register ID) {
+    DebugCompilationUnitID = ID;
+  }
+  
+  Register getDebugValue(const Metadata *MD) const {
     auto It = MDMap.find(MD);
     if (It != MDMap.end())
       return It->second;
