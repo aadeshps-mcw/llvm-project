@@ -588,7 +588,7 @@ bool SPIRVEmitNonSemanticDIMF::runOnMachineFunction(MachineFunction &MF) {
   SPIRVCodeGenContext Ctx(MIRBuilder, MRI, GR, VoidTy, I32Ty, TII, TRI, RBI, MF,
                           I32ZeroReg, TM);
 
-  emitDebugLineInstructions(Ctx, EntryDebugSourceResIdReg);
+  emitDebugLineInstructions(Ctx, Register());
 
   return true;
 }
