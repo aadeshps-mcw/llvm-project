@@ -227,6 +227,10 @@ enum BaseTypeAttributeEncoding {
   UnsignedChar = 7
 };
 enum CompositeTypeAttributeEncoding { Class = 0, Struct = 1, Union = 2 };
+enum ImportedEnityAttributeEncoding {
+  ImportedModule = 0,
+  ImportedDeclaration = 1
+};
 
 enum SourceLanguage {
   Unknown = 0,
@@ -241,7 +245,8 @@ enum SourceLanguage {
   NZSL = 9,
   WGSL = 10,
   Slang = 11,
-  Zig = 12
+  Zig = 12 ,
+  CPP = 13,
 };
 
 enum Flag {
@@ -425,8 +430,6 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
     emitDebugQualifiedTypes(Collector.QualifiedDerivedTypes, Ctx);
     emitDebugTypedefs(Collector.TypedefTypes, Ctx);
     emitDebugImportedEntities(Collector.ImportedEntities, Ctx);
-    emitAllTemplateDebugInstructions(Collector.CompositeTypesWithTemplates,
-                                     Ctx);
     emitDebugTypeInheritance(Collector.InheritedTypes, Ctx);
     emitDebugTypePtrToMember(Collector.PtrToMemberTypes, Ctx);
   }
@@ -526,8 +529,6 @@ void SPIRVEmitNonSemanticDI::extractTypeMetadata(
       break;
     case dwarf::DW_TAG_inheritance:
       Collector.InheritedTypes.insert(DT);
-      llvm::errs() << "Found inheritance: " << DT->getBaseType()->getName()
-                   << "\n";
       break;
     case dwarf::DW_TAG_ptr_to_member_type:
       Collector.PtrToMemberTypes.insert(DT);
@@ -550,15 +551,7 @@ Register SPIRVEmitNonSemanticDI::findEmittedCompositeTypeReg(
   uint64_t Size = BaseType->getSizeInBits();
   unsigned Tag = BaseType->getTag();
 
-  llvm::errs() << "Looking for: " << Name << " size: " << Size
-               << " tag: " << Tag << "\n";
-
   for (const auto &[DefinedCT, Reg] : CompositeTypeRegPairs) {
-    llvm::errs() << "Looking for: " << Name << " size: " << Size
-                 << " tag: " << Tag << "\n";
-    llvm::errs() << "Found: " << DefinedCT->getName()
-                 << " size: " << DefinedCT->getSizeInBits()
-                 << " tag: " << DefinedCT->getTag() << "\n";
     if (DefinedCT->getName() == Name && DefinedCT->getSizeInBits() == Size &&
         DefinedCT->getTag() == Tag)
       return Reg;
@@ -621,7 +614,6 @@ void SPIRVEmitNonSemanticDI::emitDebugBasicTypes(
   for (auto *BasicType : BasicTypes) {
     if (!BasicType)
       continue;
-    llvm::errs() << "Collected BasicType: " << BasicType->getName() << "\n";
     const Register BasicTypeStrReg = EmitOpString(BasicType->getName(), Ctx);
 
     const Register ConstIntBitwidthReg = Ctx.GR->buildConstantInt(
@@ -658,11 +650,10 @@ void SPIRVEmitNonSemanticDI::emitDebugBasicTypes(
         transDebugFlags(BasicType), Ctx.MIRBuilder, Ctx.I32Ty, false, false);
 
     [[maybe_unused]]
-    const Register BasicTypeReg =
-        EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugTypeBasic,
-                          {BasicTypeStrReg, ConstIntBitwidthReg,
-                           AttributeEncodingReg, Ctx.I32ZeroReg, FlagsReg},
-                          Ctx);
+    const Register BasicTypeReg = EmitDIInstruction(
+        SPIRV::NonSemanticExtInst::DebugTypeBasic,
+        {BasicTypeStrReg, ConstIntBitwidthReg, AttributeEncodingReg, FlagsReg},
+        Ctx);
     Ctx.GR->addDebugValue(BasicType, BasicTypeReg);
     Ctx.BasicTypeRegPairs.emplace_back(BasicType, BasicTypeReg);
   }
@@ -705,7 +696,7 @@ void SPIRVEmitNonSemanticDI::emitDebugTypedefs(
         TypedefDT->getLine(), Ctx.MIRBuilder, Ctx.I32Ty, false, false);
     const Register ColumnReg =
         Ctx.GR->buildConstantInt(1, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
-    Register ScopeReg = Ctx.GR->getDebugValue(TypedefDT->getScope());
+    Register ScopeReg = Ctx.GR->getDebugValue(TypedefDT->getFile());
     [[maybe_unused]]
     const Register DebugTypedefReg =
         EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugTypedef,
@@ -738,8 +729,8 @@ void SPIRVEmitNonSemanticDI::emitDebugImportedEntities(
         Ctx.GR->buildConstantInt(1, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
     const Register ScopeReg = Ctx.GR->getDebugValue(Imported->getScope());
     uint32_t Tag = importedtag(Imported);
-    Register TagReg = Ctx.GR->buildConstantInt(Tag, Ctx.MIRBuilder, Ctx.I32Ty,
-                                               false, false);
+    Register TagReg =
+        Ctx.GR->buildConstantInt(Tag, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
 
     [[maybe_unused]]
     const Register DebugImportedEntityReg =
@@ -753,9 +744,9 @@ void SPIRVEmitNonSemanticDI::emitDebugImportedEntities(
 uint32_t SPIRVEmitNonSemanticDI::importedtag(const DIImportedEntity *Imported) {
   switch (Imported->getTag()) {
   case dwarf::DW_TAG_imported_module:
-    return 0;
+    return ImportedEnityAttributeEncoding::ImportedModule;
   case dwarf::DW_TAG_imported_declaration:
-    return 1;
+    return ImportedEnityAttributeEncoding::ImportedDeclaration;
   default:
     llvm_unreachable("Unknown DWARF tag for DebugImportedEntity");
   }
@@ -1035,7 +1026,7 @@ void SPIRVEmitNonSemanticDI::emitAllTemplateDebugInstructions(
     if (!CompositeReg.isValid()) {
       llvm::errs() << "Missing DebugTypeComposite for templated type: "
                    << CompTy->getName() << "\n";
-      continue;
+      break;
     }
 
     ParamRegs.insert(ParamRegs.begin(), CompositeReg);
@@ -1106,8 +1097,6 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeComposite(
                           Ctx);
 
   Ctx.GR->addDebugValue(CompTy, Res);
-  llvm::errs() << "Emitted DebugTypeComposite for: " << CompTy->getName()
-               << " with Reg: " << Res << "\n";
   Ctx.CompositeTypeRegPairs.emplace_back(CompTy, Res);
 }
 
@@ -1122,8 +1111,6 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeMember(
   const DIType *Ty = Member->getBaseType();
   Register TypeReg;
   if (isa<DICompositeType>(Ty)) {
-    llvm::errs() << "Warning: DebugGlobalVariable with composite type not "
-                    "fully supported yet\n";
     TypeReg = findEmittedCompositeTypeReg(Ty, Ctx.CompositeTypeRegPairs);
   } else {
     TypeReg = findEmittedBasicTypeReg(Ty, Ctx.BasicTypeRegPairs);
@@ -1228,8 +1215,9 @@ void SPIRVEmitNonSemanticDI::emitSingleCompilationUnit(
   case dwarf::DW_LANG_Zig:
     SpirvSourceLanguage = SourceLanguage::Zig;
     break;
-  default:
-    SpirvSourceLanguage = SourceLanguage::Zig;
+  case dwarf::DW_LANG_C_plus_plus_14:
+    SpirvSourceLanguage = SourceLanguage::CPP;
+    break;
   }
 
   Register SourceLanguageReg = Ctx.GR->buildConstantInt(
@@ -1242,9 +1230,6 @@ void SPIRVEmitNonSemanticDI::emitSingleCompilationUnit(
                         Ctx);
 
   const DIFile *File = Ctx.MF.getFunction().getSubprogram()->getFile();
-  llvm::errs() << "Emitted DebugCompilationUnit for file: " << File
-               << " and name is" << (File ? File->getFilename() : "<unknown>")
-               << "\n";
   Ctx.GR->addDebugValue(File, DebugCompUnitResIdReg);
   Ctx.GR->addDebugValue(Ctx.MF.getFunction().getSubprogram()->getUnit(),
                         DebugCompUnitResIdReg);
@@ -1343,8 +1328,6 @@ Register SPIRVEmitNonSemanticDI::emitDebugGlobalVariable(
   const DIType *Ty = DIGV->getType();
   Register TypeReg;
   if (isa<DICompositeType>(Ty)) {
-    llvm::errs() << "Warning: DebugGlobalVariable with composite type not "
-                    "fully supported yet\n";
     TypeReg = findEmittedCompositeTypeReg(Ty, Ctx.CompositeTypeRegPairs);
   } else {
     TypeReg = findEmittedBasicTypeReg(Ty, Ctx.BasicTypeRegPairs);
@@ -1412,9 +1395,6 @@ void SPIRVEmitNonSemanticDI::emitDebugTypeInheritance(
         // No base type → DebugInfoNone
         EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugInfoNone, {}, Ctx);
       } else if (isa<DICompositeType>(BaseTy)) {
-        // Composite type
-        llvm::errs() << "Warning: DebugGlobalVariable with composite type not "
-                        "fully supported yet\n";
         TypeReg =
             findEmittedCompositeTypeReg(BaseTy, Ctx.CompositeTypeRegPairs);
       }
@@ -1515,11 +1495,11 @@ uint32_t
 SPIRVEmitNonSemanticDI::mapDwarfTagToTypeComposite(const DICompositeType *CT) {
   switch (CT->getTag()) {
   case dwarf::DW_TAG_structure_type:
-    return 0;
+    return CompositeTypeAttributeEncoding::Struct;
   case dwarf::DW_TAG_class_type:
-    return 1;
+    return CompositeTypeAttributeEncoding::Class;
   case dwarf::DW_TAG_union_type:
-    return 2;
+    return CompositeTypeAttributeEncoding::Union;
   default:
     llvm_unreachable("Unknown DWARF tag for DebugTypeComposite");
   }
