@@ -72,6 +72,10 @@ class SPIRVGlobalRegistry : public SPIRVIRMapping {
   // Holds the maximum ID we have in the module.
   unsigned Bound;
 
+  DenseMap<const Metadata *, Register> MDMap;
+  Register DebugSourceID = 0;
+  Register DebugCompilationUnitID = 0;
+
   // Maps values associated with untyped pointers into deduced element types of
   // untyped pointers.
   DenseMap<Value *, Type *> DeducedElTys;
@@ -132,6 +136,23 @@ public:
     auto It = FunResPointerTypes.find(ArgF);
     return It == FunResPointerTypes.end() ? nullptr : It->second;
   }
+
+  Register getDebugSourceID() const { return DebugSourceID; }
+
+  void setDebugSourceID(Register ID) { DebugSourceID = ID; }
+
+  Register getDebugCompilationUnitID() const { return DebugCompilationUnitID; }
+
+  void setDebugCompilationUnitID(Register ID) { DebugCompilationUnitID = ID; }
+
+  Register getDebugValue(const Metadata *MD) const {
+    auto It = MDMap.find(MD);
+    if (It != MDMap.end())
+      return It->second;
+    return Register();
+  }
+
+  void addDebugValue(const Metadata *MD, Register Reg) { MDMap[MD] = Reg; }
 
   // A registry of "assign type" records:
   // - Add a record.
