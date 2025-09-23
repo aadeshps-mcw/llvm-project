@@ -93,6 +93,7 @@ private:
   Register EmitOpString(StringRef, SPIRVCodeGenContext &Ctx);
   uint32_t transDebugFlags(const DINode *DN);
   uint32_t mapDebugFlags(DINode::DIFlags DFlags);
+  uint32_t mapDwarfTagToTypeQualifier(unsigned Tag);
   void extractTypeMetadata(DIType *Ty, DebugInfoCollector &Collector);
 
   Register EmitDIInstruction(SPIRV::NonSemanticExtInst::NonSemanticExtInst Inst,
@@ -122,6 +123,25 @@ private:
                                  Register DwarfVersionReg,
                                  Register &DebugSourceResIdReg,
                                  Register &DebugCompUnitResIdReg);
+
+  void emitDebugQualifiedTypes(
+      const SmallPtrSetImpl<DIDerivedType *> &QualifiedDerivedTypes,
+      SPIRVCodeGenContext &Ctx);
+
+  uint32_t importedtag(const DIImportedEntity *Imported);
+
+  void emitDebugTypedefs(const SmallPtrSetImpl<DIDerivedType *> &TypedefTypes,
+                         SPIRVCodeGenContext &Ctx);
+
+  void emitDebugImportedEntities(
+      const SmallVectorImpl<const DIImportedEntity *> &ImportedEntities,
+      SPIRVCodeGenContext &Ctx);
+
+  void emitDebugMacroDefs(const DICompileUnit *CU, SPIRVCodeGenContext &Ctx);
+
+  void emitDebugMacroUndef(const DIMacro *MacroUndef, StringRef FileName,
+                           SPIRVCodeGenContext &Ctx,
+                           const DenseMap<StringRef, Register> &MacroDefRegs);
 };
 
 INITIALIZE_PASS(SPIRVEmitNonSemanticDI, DEBUG_TYPE,
@@ -306,11 +326,14 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
                                 Ctx.DebugSourceResIdReg, DebugCompUnitResIdReg);
       Ctx.GR->addDebugValue(CU, DebugCompUnitResIdReg);
     }
-
+    emitDebugMacroDefs(CU, Ctx);
     emitDebugBuildIdentifier(BuildIdentifier, Ctx);
     emitDebugStoragePath(BuildStoragePath, Ctx);
     emitDebugBasicTypes(Collector.BasicTypes, Ctx);
     emitDebugPointerTypes(Collector.PointerDerivedTypes, Ctx);
+    emitDebugQualifiedTypes(Collector.QualifiedDerivedTypes, Ctx);
+    emitDebugTypedefs(Collector.TypedefTypes, Ctx);
+    emitDebugImportedEntities(Collector.ImportedEntities, Ctx);
   }
   return true;
 }
@@ -324,6 +347,21 @@ bool SPIRVEmitNonSemanticDI::runOnMachineFunction(MachineFunction &MF) {
     Res = emitGlobalDI(MF);
   }
   return Res;
+}
+
+uint32_t SPIRVEmitNonSemanticDI::mapDwarfTagToTypeQualifier(unsigned Tag) {
+  switch (Tag) {
+  case dwarf::DW_TAG_const_type:
+    return 0;
+  case dwarf::DW_TAG_volatile_type:
+    return 1;
+  case dwarf::DW_TAG_restrict_type:
+    return 2;
+  case dwarf::DW_TAG_atomic_type:
+    return 3;
+  default:
+    llvm_unreachable("Unknown DWARF tag for DebugTypeQualifier");
+  }
 }
 
 void SPIRVEmitNonSemanticDI::extractTypeMetadata(
@@ -623,6 +661,163 @@ void SPIRVEmitNonSemanticDI::emitSingleCompilationUnit(
   Ctx.GR->addDebugValue(File, DebugCompUnitResIdReg);
   Ctx.GR->addDebugValue(Ctx.MF.getFunction().getSubprogram()->getUnit(),
                         DebugCompUnitResIdReg);
+}
+
+void SPIRVEmitNonSemanticDI::emitDebugQualifiedTypes(
+    const SmallPtrSetImpl<DIDerivedType *> &QualifiedDerivedTypes,
+    SPIRVCodeGenContext &Ctx) {
+  if (!QualifiedDerivedTypes.empty()) {
+    for (const auto *QualifiedDT : QualifiedDerivedTypes) {
+      Register BaseTypeReg = findEmittedBasicTypeReg(QualifiedDT->getBaseType(),
+                                                     Ctx.BasicTypeRegPairs);
+      if (!BaseTypeReg)
+        continue;
+
+      const uint32_t QualifierValue =
+          mapDwarfTagToTypeQualifier(QualifiedDT->getTag());
+      const Register QualifierConstReg = Ctx.GR->buildConstantInt(
+          QualifierValue, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+
+      [[maybe_unused]]
+      const Register DebugQualifiedTypeReg =
+          EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugTypeQualifier,
+                            {BaseTypeReg, QualifierConstReg}, Ctx);
+    }
+  }
+}
+
+void SPIRVEmitNonSemanticDI::emitDebugTypedefs(
+    const SmallPtrSetImpl<DIDerivedType *> &TypedefTypes,
+    SPIRVCodeGenContext &Ctx) {
+  for (const auto *TypedefDT : TypedefTypes) {
+    Register BaseTypeReg = findEmittedBasicTypeReg(TypedefDT->getBaseType(),
+                                                   Ctx.BasicTypeRegPairs);
+    if (!BaseTypeReg)
+      continue;
+
+    const Register TypedefNameReg = EmitOpString(TypedefDT->getName(), Ctx);
+    const Register LineReg = Ctx.GR->buildConstantInt(
+        TypedefDT->getLine(), Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+    const Register ColumnReg =
+        Ctx.GR->buildConstantInt(1, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+    Register ScopeReg = Ctx.GR->getDebugValue(TypedefDT->getScope());
+    [[maybe_unused]]
+    const Register DebugTypedefReg =
+        EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugTypedef,
+                          {TypedefNameReg, BaseTypeReg, Ctx.DebugSourceResIdReg,
+                           LineReg, ColumnReg, ScopeReg},
+                          Ctx);
+  }
+}
+
+void SPIRVEmitNonSemanticDI::emitDebugImportedEntities(
+    const SmallVectorImpl<const DIImportedEntity *> &ImportedEntities,
+    SPIRVCodeGenContext &Ctx) {
+  for (const auto *Imported : ImportedEntities) {
+    if (!Imported->getEntity())
+      continue;
+
+    const Register NameStrReg = EmitOpString(Imported->getName(), Ctx);
+    const Register FilePathStrReg = EmitOpString(
+        Imported->getFile() ? Imported->getFile()->getFilename() : "<unknown>",
+        Ctx);
+    const Register DebugSourceReg = EmitDIInstruction(
+        SPIRV::NonSemanticExtInst::DebugSource, {FilePathStrReg}, Ctx);
+    // TODO: Handle Entity as there are no current instructions for DINamespace,
+    // so replaced by DebugInfoNone
+    const Register EntityReg =
+        EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugInfoNone, {}, Ctx);
+    const Register LineReg = Ctx.GR->buildConstantInt(
+        Imported->getLine(), Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+    const Register ColumnReg =
+        Ctx.GR->buildConstantInt(1, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+    const Register ScopeReg = Ctx.GR->getDebugValue(Imported->getScope());
+    uint32_t Tag = importedtag(Imported);
+    Register TagReg =
+        Ctx.GR->buildConstantInt(Tag, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+
+    [[maybe_unused]]
+    const Register DebugImportedEntityReg =
+        EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugImportedEntity,
+                          {NameStrReg, TagReg, DebugSourceReg, EntityReg,
+                           LineReg, ColumnReg, ScopeReg},
+                          Ctx);
+  }
+}
+
+uint32_t SPIRVEmitNonSemanticDI::importedtag(const DIImportedEntity *Imported) {
+  switch (Imported->getTag()) {
+  case dwarf::DW_TAG_imported_module:
+    return 0;
+  case dwarf::DW_TAG_imported_declaration:
+    return 1;
+  default:
+    llvm_unreachable("Unknown DWARF tag for DebugImportedEntity");
+  }
+}
+
+void SPIRVEmitNonSemanticDI::emitDebugMacroDefs(const DICompileUnit *CU,
+                                                SPIRVCodeGenContext &Ctx) {
+
+  DenseMap<StringRef, Register> MacroDefRegs;
+  if (!CU || !CU->getMacros())
+    return;
+  const StringRef FileName =
+      CU->getFile() ? CU->getFile()->getFilename() : "<unknown>";
+
+  std::function<void(const MDNode *)> WalkMacroTree;
+  WalkMacroTree = [&](const MDNode *Node) {
+    if (const auto *Macro = dyn_cast<DIMacro>(Node)) {
+      if (Macro->getMacinfoType() == dwarf::DW_MACINFO_define) {
+        // Optionally skip macros without line numbers
+        if (Macro->getLine() == 0)
+          return;
+
+        const StringRef Name = Macro->getName();
+        const StringRef Value = Macro->getValue();
+        const unsigned Line = Macro->getLine();
+        const Register SourceStrReg = EmitOpString(FileName, Ctx);
+        const Register LineConstReg =
+            Ctx.GR->buildConstantInt(Line, Ctx.MIRBuilder, Ctx.I32Ty, false);
+        const Register NameStrReg = EmitOpString(Name, Ctx);
+        const Register ValueStrReg = EmitOpString(Value, Ctx);
+
+        [[maybe_unused]] const Register DebugMacroDefReg = EmitDIInstruction(
+            SPIRV::NonSemanticExtInst::DebugMacroDef,
+            {SourceStrReg, LineConstReg, NameStrReg, ValueStrReg}, Ctx);
+        MacroDefRegs[Macro->getName()] = DebugMacroDefReg;
+      } else if (Macro->getMacinfoType() == dwarf::DW_MACINFO_undef) {
+        emitDebugMacroUndef(Macro, FileName, Ctx, MacroDefRegs);
+      }
+    } else if (const auto *MacroFile = dyn_cast<DIMacroFile>(Node)) {
+      for (const auto &Child : MacroFile->getElements())
+        WalkMacroTree(Child);
+    }
+  };
+
+  for (const auto &MacroNode : CU->getMacros()->operands()) {
+    if (const auto *MD = dyn_cast<MDNode>(MacroNode.get()))
+      WalkMacroTree(MD);
+  }
+}
+void SPIRVEmitNonSemanticDI::emitDebugMacroUndef(
+    const DIMacro *MacroUndef, StringRef FileName, SPIRVCodeGenContext &Ctx,
+    const DenseMap<StringRef, Register> &MacroDefRegs) {
+
+  const StringRef Name = MacroUndef->getName();
+  const unsigned Line = MacroUndef->getLine();
+  auto It = MacroDefRegs.find(Name);
+  if (It == MacroDefRegs.end())
+    return;
+
+  Register MacroDefReg = It->second;
+  Register SourceStrReg = EmitOpString(FileName, Ctx);
+  Register LineConstReg =
+      Ctx.GR->buildConstantInt(Line, Ctx.MIRBuilder, Ctx.I32Ty, false);
+
+  [[maybe_unused]] Register MacroUndefReg =
+      EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugMacroUndef,
+                        {SourceStrReg, LineConstReg, MacroDefReg}, Ctx);
 }
 
 uint32_t SPIRVEmitNonSemanticDI::transDebugFlags(const DINode *DN) {
