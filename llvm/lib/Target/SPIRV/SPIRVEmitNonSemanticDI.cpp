@@ -441,7 +441,7 @@ bool SPIRVEmitNonSemanticDI::runOnMachineFunction(MachineFunction &MF) {
   // emitGlobalDI needs to be executed only once to avoid
   // emitting duplicates
   if (!IsGlobalDIEmitted) {
-    IsGlobalDIEmitted = true;
+    // IsGlobalDIEmitted = true;
     Res = emitGlobalDI(MF);
   }
   return Res;
