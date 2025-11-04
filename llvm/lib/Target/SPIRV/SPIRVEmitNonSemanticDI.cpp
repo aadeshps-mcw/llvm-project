@@ -79,13 +79,13 @@ struct DebugInfoCollector {
   DenseSet<const DIType *> visitedTypes;
 };
 
-struct SPIRVEmitNonSemanticDI : public MachineFunctionPass {
+struct SPIRVEmitNonSemanticDI : public llvm::ModulePass {
   static char ID;
   SPIRVTargetMachine *TM;
   SPIRVEmitNonSemanticDI(SPIRVTargetMachine *TM = nullptr)
-      : MachineFunctionPass(ID), TM(TM) {}
+      : ModulePass(ID), TM(TM) {}
 
-  bool runOnMachineFunction(MachineFunction &MF) override;
+  bool runOnModule(llvm::Module &M) override;
 
 private:
   bool IsGlobalDIEmitted = false;
@@ -95,6 +95,11 @@ private:
   uint32_t mapDebugFlags(DINode::DIFlags DFlags);
   uint32_t mapDwarfTagToTypeQualifier(unsigned Tag);
   void extractTypeMetadata(DIType *Ty, DebugInfoCollector &Collector);
+  void getAnalysisUsage(AnalysisUsage &AU) const;
+
+  void emitDebugLineInstructions(SPIRVCodeGenContext &Ctx);
+
+  void emitDebugLinePerInstruction(MachineInstr &MI, SPIRVCodeGenContext &Ctx);
 
   Register EmitDIInstruction(SPIRV::NonSemanticExtInst::NonSemanticExtInst Inst,
                              ArrayRef<Register> Operands,
@@ -149,8 +154,7 @@ INITIALIZE_PASS(SPIRVEmitNonSemanticDI, DEBUG_TYPE,
 
 char SPIRVEmitNonSemanticDI::ID = 0;
 
-MachineFunctionPass *
-llvm::createSPIRVEmitNonSemanticDIPass(SPIRVTargetMachine *TM) {
+ModulePass *llvm::createSPIRVEmitNonSemanticDIPass(SPIRVTargetMachine *TM) {
   return new SPIRVEmitNonSemanticDI(TM);
 }
 
@@ -334,19 +338,49 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
     emitDebugQualifiedTypes(Collector.QualifiedDerivedTypes, Ctx);
     emitDebugTypedefs(Collector.TypedefTypes, Ctx);
     emitDebugImportedEntities(Collector.ImportedEntities, Ctx);
+    emitDebugLineInstructions(Ctx);
   }
   return true;
 }
 
-bool SPIRVEmitNonSemanticDI::runOnMachineFunction(MachineFunction &MF) {
-  bool Res = false;
-  // emitGlobalDI needs to be executed only once to avoid
-  // emitting duplicates
-  if (!IsGlobalDIEmitted) {
-    IsGlobalDIEmitted = true;
-    Res = emitGlobalDI(MF);
+// bool SPIRVEmitNonSemanticDI::runOnMachineFunction(MachineFunction &MF) {
+//   bool Res = false;
+//   // emitGlobalDI needs to be executed only once to avoid
+//   // emitting duplicates
+//   if (!IsGlobalDIEmitted) {
+//     IsGlobalDIEmitted = true;
+//     Res = emitGlobalDI(MF);
+//   }
+//   return Res;
+// }
+
+bool SPIRVEmitNonSemanticDI::runOnModule(llvm::Module &M) {
+  bool Changed = false;
+  auto *MMIWrapper = getAnalysisIfAvailable<MachineModuleInfoWrapperPass>();
+  if (!MMIWrapper) {
+    return Changed;
   }
-  return Res;
+  auto &MMI = MMIWrapper->getMMI();
+  if (MMI.getModule() != &M) {
+    return Changed;
+  }
+  if (M.begin() == M.end())
+    return false;
+  for (auto &F : M) {
+    if (F.isDeclaration())
+      continue;
+    if (MachineFunction *MF = MMI.getMachineFunction(F)) {
+      emitGlobalDI(*MF);
+    } else {
+      continue;
+    }
+  }
+  return Changed;
+}
+
+void SPIRVEmitNonSemanticDI::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.addRequired<MachineModuleInfoWrapperPass>();
+  AU.setPreservesAll();
 }
 
 uint32_t SPIRVEmitNonSemanticDI::mapDwarfTagToTypeQualifier(unsigned Tag) {
@@ -659,6 +693,7 @@ void SPIRVEmitNonSemanticDI::emitSingleCompilationUnit(
 
   const DIFile *File = Ctx.MF.getFunction().getSubprogram()->getFile();
   Ctx.GR->addDebugValue(File, DebugCompUnitResIdReg);
+  Ctx.GR->addDebugValue(File, DebugSourceResIdReg);
   Ctx.GR->addDebugValue(Ctx.MF.getFunction().getSubprogram()->getUnit(),
                         DebugCompUnitResIdReg);
 }
@@ -882,4 +917,46 @@ uint32_t SPIRVEmitNonSemanticDI::mapDebugFlags(DINode::DIFlags DFlags) {
   if (DFlags & DINode::FlagEnumClass)
     Flags |= Flag::FlagIsEnumClass;
   return Flags;
+}
+
+void SPIRVEmitNonSemanticDI::emitDebugLineInstructions(
+    SPIRVCodeGenContext &Ctx) {
+  for (auto &MBB : Ctx.MF) {
+    for (auto &MI : MBB) {
+      emitDebugLinePerInstruction(MI, Ctx);
+    }
+  }
+}
+
+void SPIRVEmitNonSemanticDI::emitDebugLinePerInstruction(
+    MachineInstr &MI, SPIRVCodeGenContext &Ctx) {
+  DebugLoc DL = MI.getDebugLoc();
+
+  if (!DL) {
+    Ctx.MIRBuilder.setInsertPt(*MI.getParent(), MI.getIterator());
+    EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugNoLine,
+                      ArrayRef<Register>{}, Ctx);
+    return;
+  }
+
+  const DILocation *DIL = DL.get();
+  if (!DIL)
+    return;
+  const DIFile *File = DIL->getFile();
+  Register Source = Ctx.GR->getDebugValue(File);
+  if (!File)
+    return;
+  Register LineReg = Ctx.GR->buildConstantInt(DIL->getLine(), Ctx.MIRBuilder,
+                                              Ctx.I32Ty, false);
+  Register ColReg = Ctx.GR->buildConstantInt(DIL->getColumn(), Ctx.MIRBuilder,
+                                             Ctx.I32Ty, false);
+  Ctx.MIRBuilder.setInsertPt(*MI.getParent(), MI.getIterator());
+
+  SmallVector<Register, 5> Ops;
+  Ops.push_back(Source);
+  Ops.push_back(LineReg);
+  Ops.push_back(LineReg);
+  Ops.push_back(ColReg);
+  Ops.push_back(ColReg);
+  EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugLine, Ops, Ctx);
 }
