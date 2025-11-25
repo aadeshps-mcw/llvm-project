@@ -46,6 +46,8 @@ struct SPIRVCodeGenContext {
       &BasicTypeRegPairs;
   SmallVector<std::pair<const DICompositeType *const, const Register>, 12>
       &CompositeTypeRegPairs;
+  SmallVector<std::pair<const DIFile *const, const Register>, 12>
+      &SourceRegPairs;
 
   SPIRVCodeGenContext(
       MachineIRBuilder &Builder, MachineRegisterInfo &RegInfo,
@@ -57,12 +59,15 @@ struct SPIRVCodeGenContext {
       SmallVector<std::pair<const DIBasicType *const, const Register>, 12>
           &BasicTypePairs,
       SmallVector<std::pair<const DICompositeType *const, const Register>, 12>
-          &CompositeTypePairs)
+          &CompositeTypePairs,
+      SmallVector<std::pair<const DIFile *const, const Register>, 12>
+          &SourceRegisterPairs)
       : MIRBuilder(Builder), MRI(RegInfo), GR(Registry), VoidTy(VTy),
         I32Ty(I32Ty), TII(TI), TRI(TR), RBI(RB), MF(Function),
         I32ZeroReg(ZeroReg), TM(TargetMachine),
         DebugSourceResIdReg(DebugSrcReg), BasicTypeRegPairs(BasicTypePairs),
-        CompositeTypeRegPairs(CompositeTypePairs) {}
+        CompositeTypeRegPairs(CompositeTypePairs),
+        SourceRegPairs(SourceRegisterPairs) {}
 };
 struct DebugInfoCollector {
   SmallPtrSet<DIBasicType *, 12> BasicTypes;
@@ -89,7 +94,7 @@ struct SPIRVEmitNonSemanticDI : public llvm::ModulePass {
 
 private:
   bool IsGlobalDIEmitted = false;
-  bool emitGlobalDI(MachineFunction &MF);
+  bool emitGlobalDI(MachineFunction &MF, SPIRVCodeGenContext &Ctx);
   Register EmitOpString(StringRef, SPIRVCodeGenContext &Ctx);
   uint32_t transDebugFlags(const DINode *DN);
   uint32_t mapDebugFlags(DINode::DIFlags DFlags);
@@ -110,6 +115,9 @@ private:
 
   void emitDebugStoragePath(StringRef BuildStoragePath,
                             SPIRVCodeGenContext &Ctx);
+
+  Register getOrCreateFileRegister(const DIFile *File,
+                                   SPIRVCodeGenContext &Ctx);
 
   void emitDebugBasicTypes(const SmallPtrSetImpl<DIBasicType *> &BasicTypes,
                            SPIRVCodeGenContext &Ctx);
@@ -209,7 +217,8 @@ enum Flag {
   FlagBitField = 1 << 18
 };
 
-bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
+bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF,
+                                          SPIRVCodeGenContext &Ctx) {
   // If this MachineFunction doesn't have any BB repeat procedure
   // for the next
   if (MF.begin() == MF.end()) {
@@ -284,61 +293,40 @@ bool SPIRVEmitNonSemanticDI::emitGlobalDI(MachineFunction &MF) {
   // NonSemantic.Shader.DebugInfo.100 global DI instruction emitting
   {
     // Required LLVM variables for emitting logic
-    const SPIRVInstrInfo *TII = TM->getSubtargetImpl()->getInstrInfo();
-    const SPIRVRegisterInfo *TRI = TM->getSubtargetImpl()->getRegisterInfo();
-    const RegisterBankInfo *RBI = TM->getSubtargetImpl()->getRegBankInfo();
-    SPIRVGlobalRegistry *GR = TM->getSubtargetImpl()->getSPIRVGlobalRegistry();
-    MachineRegisterInfo &MRI = MF.getRegInfo();
-    MachineBasicBlock &MBB = *MF.begin();
+    if (!IsGlobalDIEmitted) {
+      const Register DwarfVersionReg = Ctx.GR->buildConstantInt(
+          DwarfVersion, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
 
-    // To correct placement of a OpLabel instruction during SPIRVAsmPrinter
-    // emission all new instructions needs to be placed after OpFunction
-    // and before first terminator
-    MachineIRBuilder MIRBuilder(MBB, MBB.getFirstTerminator());
-    SmallVector<std::pair<const DIBasicType *const, const Register>, 12>
-        BasicTypeRegPairs;
-    SmallVector<std::pair<const DICompositeType *const, const Register>, 12>
-        CompositeTypeRegPairs;
-    Register DebugSourceResIdReg;
+      const Register DebugInfoVersionReg = Ctx.GR->buildConstantInt(
+          DebugInfoVersion, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
 
-    const SPIRVType *VoidTy =
-        GR->getOrCreateSPIRVType(Type::getVoidTy(*Context), MIRBuilder,
-                                 SPIRV::AccessQualifier::ReadWrite, false);
+      const Function &F = MF.getFunction();
+      const DISubprogram *SP = F.getSubprogram();
 
-    const SPIRVType *I32Ty =
-        GR->getOrCreateSPIRVType(Type::getInt32Ty(*Context), MIRBuilder,
-                                 SPIRV::AccessQualifier::ReadWrite, false);
+      // If no subprogram, we cannot emit debug info for this function.
+      // This prevents the Segmentation Fault.
+      if (!SP)
+        return false;
 
-    const Register DwarfVersionReg =
-        GR->buildConstantInt(DwarfVersion, MIRBuilder, I32Ty, false, false);
+      const DICompileUnit *CU = SP->getUnit();
+      if (!CU)
+        return false;
 
-    const Register DebugInfoVersionReg =
-        GR->buildConstantInt(DebugInfoVersion, MIRBuilder, I32Ty, false, false);
-
-    const Register I32ZeroReg =
-        GR->buildConstantInt(0, MIRBuilder, I32Ty, false, false);
-
-    SPIRVCodeGenContext Ctx(MIRBuilder, MRI, GR, VoidTy, I32Ty, TII, TRI, RBI,
-                            MF, I32ZeroReg, TM, DebugSourceResIdReg,
-                            BasicTypeRegPairs, CompositeTypeRegPairs);
-
-    const DICompileUnit *CU = MF.getFunction().getSubprogram()->getUnit();
-
-    for (unsigned Idx = 0; Idx < LLVMSourceLanguages.size(); ++Idx) {
-      emitSingleCompilationUnit(FilePaths[Idx], LLVMSourceLanguages[Idx], Ctx,
-                                DebugInfoVersionReg, DwarfVersionReg,
-                                Ctx.DebugSourceResIdReg, DebugCompUnitResIdReg);
-      Ctx.GR->addDebugValue(CU, DebugCompUnitResIdReg);
+      for (unsigned Idx = 0; Idx < LLVMSourceLanguages.size(); ++Idx) {
+        emitSingleCompilationUnit(
+            FilePaths[Idx], LLVMSourceLanguages[Idx], Ctx, DebugInfoVersionReg,
+            DwarfVersionReg, Ctx.DebugSourceResIdReg, DebugCompUnitResIdReg);
+        Ctx.GR->addDebugValue(CU, DebugCompUnitResIdReg);
+      }
+      emitDebugMacroDefs(CU, Ctx);
+      emitDebugBuildIdentifier(BuildIdentifier, Ctx);
+      emitDebugStoragePath(BuildStoragePath, Ctx);
+      emitDebugBasicTypes(Collector.BasicTypes, Ctx);
+      emitDebugPointerTypes(Collector.PointerDerivedTypes, Ctx);
+      emitDebugQualifiedTypes(Collector.QualifiedDerivedTypes, Ctx);
+      emitDebugTypedefs(Collector.TypedefTypes, Ctx);
+      emitDebugImportedEntities(Collector.ImportedEntities, Ctx);
     }
-    emitDebugMacroDefs(CU, Ctx);
-    emitDebugBuildIdentifier(BuildIdentifier, Ctx);
-    emitDebugStoragePath(BuildStoragePath, Ctx);
-    emitDebugBasicTypes(Collector.BasicTypes, Ctx);
-    emitDebugPointerTypes(Collector.PointerDerivedTypes, Ctx);
-    emitDebugQualifiedTypes(Collector.QualifiedDerivedTypes, Ctx);
-    emitDebugTypedefs(Collector.TypedefTypes, Ctx);
-    emitDebugImportedEntities(Collector.ImportedEntities, Ctx);
-    emitDebugLineInstructions(Ctx);
   }
   return true;
 }
@@ -366,14 +354,51 @@ bool SPIRVEmitNonSemanticDI::runOnModule(llvm::Module &M) {
   }
   if (M.begin() == M.end())
     return false;
+  IsGlobalDIEmitted = false;
   for (auto &F : M) {
     if (F.isDeclaration())
       continue;
-    if (MachineFunction *MF = MMI.getMachineFunction(F)) {
-      emitGlobalDI(*MF);
-    } else {
+    MachineFunction *MF = MMI.getMachineFunction(F);
+    if (!MF)
       continue;
-    }
+
+    MachineRegisterInfo &MRI = MF->getRegInfo();
+    MachineBasicBlock &MBB = *MF->begin();
+    MachineIRBuilder MIRBuilder(MBB, MBB.getFirstTerminator());
+
+    const SPIRVInstrInfo *TII = TM->getSubtargetImpl()->getInstrInfo();
+    const SPIRVRegisterInfo *TRI = TM->getSubtargetImpl()->getRegisterInfo();
+    const RegisterBankInfo *RBI = TM->getSubtargetImpl()->getRegBankInfo();
+    SPIRVGlobalRegistry *GR = TM->getSubtargetImpl()->getSPIRVGlobalRegistry();
+
+    const SPIRVType *VoidTy =
+        GR->getOrCreateSPIRVType(Type::getVoidTy(M.getContext()), MIRBuilder,
+                                 SPIRV::AccessQualifier::ReadWrite, false);
+    const SPIRVType *I32Ty =
+        GR->getOrCreateSPIRVType(Type::getInt32Ty(M.getContext()), MIRBuilder,
+                                 SPIRV::AccessQualifier::ReadWrite, false);
+    const Register I32ZeroReg =
+        GR->buildConstantInt(0, MIRBuilder, I32Ty, false, false);
+
+    // Dummy containers
+    SmallVector<std::pair<const DIBasicType *const, const Register>, 12> BT;
+    SmallVector<std::pair<const DICompositeType *const, const Register>, 12> CT;
+    SmallVector<std::pair<const DIFile *const, const Register>, 12>
+        SourceRegPairs;
+    Register DummyDebugSrc;
+
+    SPIRVCodeGenContext Ctx(MIRBuilder, MRI, GR, VoidTy, I32Ty, TII, TRI, RBI,
+                            *MF, I32ZeroReg, TM, DummyDebugSrc, BT, CT,
+                            SourceRegPairs);
+
+    // --- EXECUTION ---
+
+    // 1. Emit Globals (Header, Types, CU)
+    // We pass the current Ctx so it can emit instructions in this function
+    emitGlobalDI(*MF, Ctx);
+
+    // 2. Emit Line Info (Now explicitly called for every function)
+    emitDebugLineInstructions(Ctx);
   }
   return Changed;
 }
@@ -652,10 +677,44 @@ void SPIRVEmitNonSemanticDI::emitSingleCompilationUnit(
     StringRef FilePath, int64_t Language, SPIRVCodeGenContext &Ctx,
     Register DebugInfoVersionReg, Register DwarfVersionReg,
     Register &DebugSourceResIdReg, Register &DebugCompUnitResIdReg) {
+
   const Register FilePathStrReg = EmitOpString(FilePath, Ctx);
 
-  DebugSourceResIdReg = EmitDIInstruction(
-      SPIRV::NonSemanticExtInst::DebugSource, {FilePathStrReg}, Ctx);
+  const Function *F = &Ctx.MF.getFunction();
+  const DISubprogram *SP = F ? F->getSubprogram() : nullptr;
+  const DIFile *FileMDNode = nullptr;
+  if (SP)
+    FileMDNode = SP->getFile();
+
+  std::string FileMDContents;
+  if (FileMDNode && FileMDNode->getRawFile() &&
+      FileMDNode->getSource().has_value())
+    FileMDContents = FileMDNode->getSource().value().str();
+
+  if (FileMDContents.empty()) {
+    DebugSourceResIdReg = EmitDIInstruction(
+        SPIRV::NonSemanticExtInst::DebugSource, {FilePathStrReg}, Ctx);
+  } else {
+    constexpr size_t MaxNumWords = UINT16_MAX - 2;
+    constexpr size_t MaxStrSize = MaxNumWords * 4 - 1;
+    std::string RemainingSource = FileMDContents;
+    std::string FirstChunk = RemainingSource.substr(0, MaxStrSize);
+    const Register FirstTextStrReg = EmitOpString(FirstChunk, Ctx);
+    DebugSourceResIdReg =
+        EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugSource,
+                          {FilePathStrReg, FirstTextStrReg}, Ctx);
+
+    RemainingSource.erase(0, FirstChunk.size());
+
+    while (!RemainingSource.empty()) {
+      std::string NextChunk = RemainingSource.substr(0, MaxStrSize);
+      const Register ContinuedStrReg = EmitOpString(NextChunk, Ctx);
+      EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugSourceContinued,
+                        {ContinuedStrReg}, Ctx);
+      RemainingSource.erase(0, NextChunk.size());
+    }
+  }
+  Ctx.SourceRegPairs.emplace_back(FileMDNode, DebugSourceResIdReg);
 
   SourceLanguage SpirvSourceLanguage = SourceLanguage::Unknown;
   switch (Language) {
@@ -680,24 +739,20 @@ void SPIRVEmitNonSemanticDI::emitSingleCompilationUnit(
   case dwarf::DW_LANG_Zig:
     SpirvSourceLanguage = SourceLanguage::Zig;
     break;
+  default:
+    SpirvSourceLanguage = SourceLanguage::Unknown;
+    break;
   }
 
-  Register SourceLanguageReg = Ctx.GR->buildConstantInt(
-      SpirvSourceLanguage, Ctx.MIRBuilder, Ctx.I32Ty, false, false);
+  const Register SourceLanguageReg = Ctx.GR->buildConstantInt(
+      SpirvSourceLanguage, Ctx.MIRBuilder, Ctx.I32Ty, false);
 
   DebugCompUnitResIdReg =
       EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugCompilationUnit,
                         {DebugInfoVersionReg, DwarfVersionReg,
                          DebugSourceResIdReg, SourceLanguageReg},
                         Ctx);
-
-  const DIFile *File = Ctx.MF.getFunction().getSubprogram()->getFile();
-  Ctx.GR->addDebugValue(File, DebugCompUnitResIdReg);
-  Ctx.GR->addDebugValue(File, DebugSourceResIdReg);
-  Ctx.GR->addDebugValue(Ctx.MF.getFunction().getSubprogram()->getUnit(),
-                        DebugCompUnitResIdReg);
 }
-
 void SPIRVEmitNonSemanticDI::emitDebugQualifiedTypes(
     const SmallPtrSetImpl<DIDerivedType *> &QualifiedDerivedTypes,
     SPIRVCodeGenContext &Ctx) {
@@ -943,13 +998,20 @@ void SPIRVEmitNonSemanticDI::emitDebugLinePerInstruction(
   if (!DIL)
     return;
   const DIFile *File = DIL->getFile();
-  Register Source = Ctx.GR->getDebugValue(File);
   if (!File)
     return;
+
+  // --- FIX START ---
+  // Do NOT use Ctx.GR->getDebugSourceID(File);
+  // Instead, ensure a local register exists for this function.
+  Register Source = getOrCreateFileRegister(File, Ctx);
+  // --- FIX END ---
+
   Register LineReg = Ctx.GR->buildConstantInt(DIL->getLine(), Ctx.MIRBuilder,
                                               Ctx.I32Ty, false);
   Register ColReg = Ctx.GR->buildConstantInt(DIL->getColumn(), Ctx.MIRBuilder,
                                              Ctx.I32Ty, false);
+
   Ctx.MIRBuilder.setInsertPt(*MI.getParent(), MI.getIterator());
 
   SmallVector<Register, 5> Ops;
@@ -959,4 +1021,85 @@ void SPIRVEmitNonSemanticDI::emitDebugLinePerInstruction(
   Ops.push_back(ColReg);
   Ops.push_back(ColReg);
   EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugLine, Ops, Ctx);
+}
+
+// Add this to SPIRVEmitNonSemanticDI class in SPIRVEmitNonSemanticDI.cpp
+// In SPIRVEmitNonSemanticDI.cpp
+
+Register
+SPIRVEmitNonSemanticDI::getOrCreateFileRegister(const DIFile *File,
+                                                SPIRVCodeGenContext &Ctx) {
+  if (!File)
+    return Register();
+
+  // 1. Check Ctx.SourceRegPairs
+  for (const auto &Pair : Ctx.SourceRegPairs) {
+    if (Pair.first == File)
+      return Pair.second;
+  }
+
+  // 2. Save insertion point to restore later
+  MachineBasicBlock &CurrentMBB = Ctx.MIRBuilder.getMBB();
+  MachineBasicBlock::iterator CurrentPos = Ctx.MIRBuilder.getInsertPt();
+
+  // 3. Move to Entry Block (Dominance Fix)
+  MachineBasicBlock &EntryMBB = *Ctx.MF.begin();
+  if (EntryMBB.empty()) {
+    Ctx.MIRBuilder.setInsertPt(EntryMBB, EntryMBB.end());
+  } else {
+    auto It = EntryMBB.begin();
+    while (It != EntryMBB.end() &&
+           (It->getOpcode() == SPIRV::OpFunction ||
+            It->getOpcode() == SPIRV::OpFunctionParameter)) {
+      ++It;
+    }
+    Ctx.MIRBuilder.setInsertPt(EntryMBB, It);
+  }
+
+  SmallString<128> FilePath;
+  sys::path::append(FilePath, File->getDirectory(), File->getFilename());
+  const Register FilePathStrReg = EmitOpString(FilePath, Ctx);
+
+  std::string FileMDContents;
+  if (File->getSource().has_value())
+    FileMDContents = File->getSource().value().str();
+
+  Register DebugSourceResIdReg;
+
+  if (FileMDContents.empty()) {
+    DebugSourceResIdReg = EmitDIInstruction(
+        SPIRV::NonSemanticExtInst::DebugSource, {FilePathStrReg}, Ctx);
+  } else {
+    constexpr size_t MaxNumWords = UINT16_MAX - 2;
+    constexpr size_t MaxStrSize = MaxNumWords * 4 - 1;
+    std::string RemainingSource = FileMDContents;
+    std::string FirstChunk = RemainingSource.substr(0, MaxStrSize);
+
+    const Register FirstTextStrReg = EmitOpString(FirstChunk, Ctx);
+
+    DebugSourceResIdReg =
+        EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugSource,
+                          {FilePathStrReg, FirstTextStrReg}, Ctx);
+
+    RemainingSource.erase(0, FirstChunk.size());
+
+    while (!RemainingSource.empty()) {
+      std::string NextChunk = RemainingSource.substr(0, MaxStrSize);
+      const Register ContinuedStrReg = EmitOpString(NextChunk, Ctx);
+      EmitDIInstruction(SPIRV::NonSemanticExtInst::DebugSourceContinued,
+                        {ContinuedStrReg}, Ctx);
+      RemainingSource.erase(0, NextChunk.size());
+    }
+  }
+
+  // 5. Cache in SourceRegPairs and Restore
+  Ctx.SourceRegPairs.emplace_back(File, DebugSourceResIdReg);
+
+  if (CurrentPos != CurrentMBB.end()) {
+    Ctx.MIRBuilder.setInsertPt(CurrentMBB, CurrentPos);
+  } else {
+    Ctx.MIRBuilder.setInsertPt(CurrentMBB, CurrentMBB.end());
+  }
+
+  return DebugSourceResIdReg;
 }

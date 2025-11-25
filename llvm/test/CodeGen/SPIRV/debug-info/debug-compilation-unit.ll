@@ -33,13 +33,13 @@
 ; CHECK-OPTION-NOT: OpExtInstImport "NonSemantic.Shader.DebugInfo.100"
 ; CHECK-OPTION-NOT: OpString "/AAAAAAAAAA/BBBBBBBB/CCCCCCCCC{{[/\\]}}example.c"
 
-define spir_func void @foo() {
+define spir_func void @foo() !dbg !8 {
 entry:
   ret void
 }
 ; CHECK-SPIRV-NOT: Lfunc_end0:
 
-define spir_func void @bar() {
+define spir_func void @bar() !dbg !9 {
 entry:
   ret void
 }
@@ -48,11 +48,14 @@ entry:
 !llvm.dbg.cu = !{!0, !6}
 !llvm.module.flags = !{!2, !3, !4, !5}
 
-!0 = distinct !DICompileUnit(language: DW_LANG_SYCL, file: !1, producer: "clang version XX.X.XXXX (FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
+!0 = distinct !DICompileUnit(language: DW_LANG_SYCL, file: !1, producer: "clang version XX.X.XXXX", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
 !1 = !DIFile(filename: "example.c", directory: "/AAAAAAAAAA/BBBBBBBB/CCCCCCCCC", checksumkind: CSK_MD5, checksum: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 !2 = !{i32 7, !"Dwarf Version", i32 5}
 !3 = !{i32 2, !"Debug Info Version", i32 3}
 !4 = !{i32 1, !"wchar_size", i32 4}
 !5 = !{i32 7, !"frame-pointer", i32 2}
-!6 = distinct !DICompileUnit(language: DW_LANG_OpenCL_CPP, file: !7, producer: "clang version XX.X.XXXX (FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
+!6 = distinct !DICompileUnit(language: DW_LANG_OpenCL_CPP, file: !7, producer: "clang version XX.X.XXXX", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, splitDebugInlining: false, nameTableKind: None)
 !7 = !DIFile(filename: "example1.cpp", directory: "/DDDDDDDDDD/EEEEEEEE/FFFFFFFFF", checksumkind: CSK_MD5, checksum: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+!8 = distinct !DISubprogram(name: "foo", scope: !1, file: !1, line: 1, type: !10, unit: !0, spFlags: DISPFlagDefinition)
+!9 = distinct !DISubprogram(name: "bar", scope: !7, file: !7, line: 1, type: !10, unit: !6, spFlags: DISPFlagDefinition)
+!10 = !DISubroutineType(types: !{})

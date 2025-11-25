@@ -629,10 +629,14 @@ static void collectOtherInstr(MachineInstr &MI, SPIRV::ModuleAnalysisInfo &MAI,
     MAI.MS[MSType].insert(MAI.MS[MSType].begin(), &MI);
 }
 
-// Some global instructions make reference to function-local ID regs, so cannot
-// be correctly collected until these registers are globally numbered.
+/// Corrected processOtherInstrs with Deduplication Logic
 void SPIRVModuleAnalysis::processOtherInstrs(const Module &M) {
   InstrTraces IS;
+
+  // [FIX] Map to track global IDs of semantically identical global
+  // instructions.
+  DenseMap<InstrSignature, MCRegister> GlobalDIMap;
+
   for (auto F = M.begin(), E = M.end(); F != E; ++F) {
     if (F->isDeclaration())
       continue;
@@ -644,8 +648,15 @@ void SPIRVModuleAnalysis::processOtherInstrs(const Module &M) {
         if (MAI.getSkipEmission(&MI))
           continue;
         const unsigned OpCode = MI.getOpcode();
+
+        // [FIX] Detect Instructions we want to deduplicate (OpString,
+        // DebugSource, etc.)
+        bool IsGlobalInstruction = false;
+        SPIRV::ModuleSectionType TargetSection;
+
         if (OpCode == SPIRV::OpString) {
-          collectOtherInstr(MI, MAI, SPIRV::MB_DebugStrings, IS);
+          IsGlobalInstruction = true;
+          TargetSection = SPIRV::MB_DebugStrings;
         } else if (OpCode == SPIRV::OpExtInst && MI.getOperand(2).isImm() &&
                    MI.getOperand(2).getImm() ==
                        SPIRV::InstructionSet::
@@ -658,12 +669,46 @@ void SPIRVModuleAnalysis::processOtherInstrs(const Module &M) {
               NS::DebugTypePointer, NS::DebugBuildIdentifier,
               NS::DebugStoragePath, NS::DebugImportedEntity,
               NS::DebugTypedef,     NS::DebugTypeQualifier};
-          bool IsGlobalDI = false;
+
           for (unsigned Idx = 0; Idx < std::size(GlobalNonSemanticDITy); ++Idx)
-            IsGlobalDI |= Ins.getImm() == GlobalNonSemanticDITy[Idx];
-          if (IsGlobalDI)
-            collectOtherInstr(MI, MAI, SPIRV::MB_NonSemanticGlobalDI, IS);
-        } else if (OpCode == SPIRV::OpName || OpCode == SPIRV::OpMemberName) {
+            if (Ins.getImm() == GlobalNonSemanticDITy[Idx]) {
+              IsGlobalInstruction = true;
+              TargetSection = SPIRV::MB_NonSemanticGlobalDI;
+              break;
+            }
+        }
+
+        if (IsGlobalInstruction) {
+          // 1. Calculate signature IGNORING the definition register
+          InstrSignature Sig = instrToSignature(MI, MAI, false);
+
+          auto It = GlobalDIMap.find(Sig);
+          if (It != GlobalDIMap.end()) {
+            // 2. DUPLICATE FOUND: Remap current register to the existing Global
+            // ID
+            if (MI.getNumOperands() > 0 && MI.getOperand(0).isReg() &&
+                MI.getOperand(0).isDef()) {
+              MAI.setRegisterAlias(MF, MI.getOperand(0).getReg(), It->second);
+            }
+            // 3. Skip emission of this duplicate
+            MAI.setSkipEmission(&MI);
+            continue;
+          } else {
+            // 4. NEW GLOBAL: Record the Global ID
+            if (MI.getNumOperands() > 0 && MI.getOperand(0).isReg() &&
+                MI.getOperand(0).isDef()) {
+              MCRegister GReg =
+                  MAI.getRegisterAlias(MF, MI.getOperand(0).getReg());
+              GlobalDIMap[Sig] = GReg;
+            }
+            collectOtherInstr(MI, MAI, TargetSection, IS);
+            continue;
+          }
+        }
+        // [END FIX]
+
+        // ... Keep the rest of the original logic below ...
+        if (OpCode == SPIRV::OpName || OpCode == SPIRV::OpMemberName) {
           collectOtherInstr(MI, MAI, SPIRV::MB_DebugNames, IS);
         } else if (OpCode == SPIRV::OpEntryPoint) {
           collectOtherInstr(MI, MAI, SPIRV::MB_EntryPoints, IS);
@@ -673,8 +718,6 @@ void SPIRVModuleAnalysis::processOtherInstrs(const Module &M) {
           collectOtherInstr(MI, MAI, SPIRV::MB_Annotations, IS);
           collectFuncNames(MI, &*F);
         } else if (TII->isConstantInstr(MI)) {
-          // Now OpSpecConstant*s are not in DT,
-          // but they need to be collected anyway.
           collectOtherInstr(MI, MAI, SPIRV::MB_TypeConstVars, IS);
         } else if (OpCode == SPIRV::OpFunction) {
           collectFuncNames(MI, &*F);

@@ -137,14 +137,6 @@ public:
     return It == FunResPointerTypes.end() ? nullptr : It->second;
   }
 
-  Register getDebugSourceID() const { return DebugSourceID; }
-
-  void setDebugSourceID(Register ID) { DebugSourceID = ID; }
-
-  Register getDebugCompilationUnitID() const { return DebugCompilationUnitID; }
-
-  void setDebugCompilationUnitID(Register ID) { DebugCompilationUnitID = ID; }
-
   Register getDebugValue(const Metadata *MD) const {
     auto It = MDMap.find(MD);
     if (It != MDMap.end())
