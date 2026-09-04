@@ -5,11 +5,13 @@
 
 #include "Aadesh/AadeshDialect.h"
 #include "Aadesh/AadeshOps.h"
+#include "Aadesh/AadeshPasses.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
   mlir::registerAllPasses();
+  mlir::aadesh::registerAadeshPasses();
 
   registry.insert<mlir::aadesh::AadeshDialect>();
 

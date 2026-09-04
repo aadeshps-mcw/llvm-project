@@ -1,10 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(aadesh-dialect CXX C)
-
 set(CMAKE_CXX_STANDARD 17)
 
 find_package(MLIR REQUIRED CONFIG)
-
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
@@ -25,14 +23,13 @@ add_definitions(${LLVM_DEFINITIONS})
 
 list(APPEND MLIR_TABLEGEN_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-set(LLVM_TARGET_DEFINITIONS ${CMAKE_CURRENT_SOURCE_DIR}/include/Aadesh/AadeshOps.td)
+find_program(LLVM_EXTERNAL_LIT NAMES llvm-lit lit.py lit)
+if(NOT LLVM_EXTERNAL_LIT)
+  message(FATAL_ERROR "llvm-lit not found — pass -DLLVM_EXTERNAL_LIT=/path/to/llvm-lit")
+endif()
 
-mlir_tablegen(include/Aadesh/AadeshDialect.h.inc -gen-dialect-decls -dialect=aadesh)
-mlir_tablegen(include/Aadesh/AadeshDialect.cpp.inc -gen-dialect-defs -dialect=aadesh)
-mlir_tablegen(include/Aadesh/AadeshOps.h.inc -gen-op-decls)
-mlir_tablegen(include/Aadesh/AadeshOps.cpp.inc -gen-op-defs)
-add_public_tablegen_target(AadeshOpsIncGen)
-
-add_subdirectory(lib/Aadesh)
+add_subdirectory(include/Aadesh)   # generates AadeshOpsIncGen + AadeshPassIncGen
+add_subdirectory(lib/Dialect)      # builds MLIRAadesh
+add_subdirectory(lib/Conversion)   # builds AadeshToTosa
 add_subdirectory(tools)
 add_subdirectory(test)
